@@ -55,11 +55,13 @@ public class UdonMidiPersistence : UdonSharpBehaviour
 
     byte[] _currentValueBytes = new byte[4];
 
+    string[] RequestIdQueue = new string[0];
     GameObject[] RequestedGameObjectQueue = new GameObject[0];
     string[] RequestedVariableQueue = new string[0];
     GameObject[] RequestedCallbackObjectQueue = new GameObject[0];
     string[] RequestedCallbackMethodQueue = new string[0];
 
+    string _requestRequestId;
     GameObject _requestGameObject;
     string _requestVariable;
     GameObject _requestCallbackObject;
@@ -67,29 +69,49 @@ public class UdonMidiPersistence : UdonSharpBehaviour
 
     bool _isInitialized;
     string _lastAutoId;
+    bool _blockInput;
+
+    string _counterPrefix;
+    int _counter;
 
     public void Start()
     {
+        if(Networking.LocalPlayer == null) return;
+        Random.InitState(Networking.LocalPlayer.playerId << 5 + System.DateTime.Now.Minute << 3 +  System.DateTime.Now.Millisecond);
+        _counterPrefix = "";
+        _counterPrefix += (char)Random.Range((int)'A', (int)'z' + 1);
+        _counterPrefix += (char)Random.Range((int)'A', (int)'z' + 1);
+        _counterPrefix += "_"; // Random Prefix to avoid collisions when swapping worlds. 
+                               // Randomized instead of deterministic to avoid collisions between two clients running the same world, joining the same minute
+        // Make sure world identifier has certain format to prevent accidental overwrites
+        if(WorldIdentifier.Contains(":") == false ||
+            WorldIdentifier.Split(':')[0].Length < 4)
+        {
+            Debug.LogError("WorldIdentifier must be at least 4 characters long and contain a colon");
+            Debug.LogError("e.g. \"Thry:MyWorld\"");
+            _blockInput = true;
+            return;
+        }
+        Debug.Log("[UdonMidiPersistence][Start]");
         for(int i = 0; i < BehavioursStrings.Length; i++)
         {
             Request(BehavioursStrings[i].gameObject, FieldsStrings[i], null);
-            _lastAutoId = BehavioursStrings[i].gameObject.name + ":" + FieldsStrings[i];
         }
         for(int i = 0; i < BehavioursInts.Length; i++)
         {
             Request(BehavioursInts[i].gameObject, FieldsInts[i], null);
-            _lastAutoId = BehavioursInts[i].gameObject.name + ":" + FieldsInts[i];
         }
         for(int i = 0; i < BehavioursFloats.Length; i++)
         {
             Request(BehavioursFloats[i].gameObject, FieldsFloats[i], null);
-            _lastAutoId = BehavioursFloats[i].gameObject.name + ":" + FieldsFloats[i];
         }
-        if(_lastAutoId == null) _isInitialized = true;
+        if(_counter == 0) _isInitialized = true;
+        else _lastAutoId = _counterPrefix+_counter;
     }
 
     public override void OnPlayerLeft(VRCPlayerApi player)
     {
+        if(_blockInput) return;
         if(player == Networking.LocalPlayer)
         {
             for(int i=0;i<BeforeSaveHooksBehaviours.Length;i++)
@@ -104,53 +126,89 @@ public class UdonMidiPersistence : UdonSharpBehaviour
         }
     }
 
-    public void Request(GameObject gameObject, string name, string callback)
+    /// <summary>
+    /// Request a value from the app. Uses the world id dictionary.
+    /// </summary>
+    /// <param name="gameObject">The game object to request the value from</param>
+    /// <param name="variableName">The field to load</param>
+    /// <param name="callback">The udon event to call once the field has been loaded</param>
+    public void Request(GameObject gameObject, string variableName, string callback)
     {
-        Request(gameObject, name, gameObject.GetComponent<UdonBehaviour>(), callback, WorldIdentifier);
+        Request(WorldIdentifier, $"{gameObject.name}:{variableName}", gameObject, variableName, gameObject, callback);
     }
 
-    public void Request(GameObject gameObject, string name, string callback, string dictionaryId)
+    /// <summary>
+    /// Request a value from the app. Uses a custom dictionary.
+    /// </summary>
+    /// <param name="gameObject">The game object to request the value from</param>
+    /// <param name="variableName">The field to load</param>
+    /// <param name="callback">The udon event to call once the field has been loaded</param>
+    /// <param name="dictionaryId">The dictionary to use</param>
+    public void Request(GameObject gameObject, string variableName, string callback, string dictionaryId)
     {
-        Request(gameObject, name, gameObject.GetComponent<UdonBehaviour>(), callback, dictionaryId);
+        Request(dictionaryId, $"{gameObject.name}:{variableName}", gameObject, variableName, gameObject, callback);
     }
 
-    public void Request(GameObject targetGameObject, string name, UdonBehaviour callbackBehaviour,  string callback, string dictionaryId)
+    /// <summary>
+    /// Request a saved value from the app. Use the Request Method, if you are not 100% sure how this method works.
+    /// </summary>
+    /// <param name="dictionaryId">The dictionary to get the field from</param>
+    /// <param name="dictionaryKey">The key to get</param>
+    /// <param name="targetGameObject">The gameobject that contains the field</param>
+    /// <param name="variableName">The name of the field</param>
+    /// <param name="callbackGameObject">The gameobject that contains the callback method</param>
+    /// <param name="callbackMethodName">The name of the callback method</param>
+    public void Request(string dictionaryId, string dictionaryKey, GameObject targetGameObject, string variableName, GameObject callbackBehaviour,  string callback)
     {
+        if(_blockInput) return;
         if(targetGameObject == null) return;
         if(string.IsNullOrEmpty(name)) return;
 
-        EnqueueRequest(targetGameObject, name, callbackBehaviour.gameObject, callback);
-        Debug.Log($"[UdonMidiPersistence][Request] {{\"id\":\"{targetGameObject.name}:{name}\", \"dictionaryId\":\"{dictionaryId}\"}}");
+        string reqId = EnqueueRequest(targetGameObject, variableName, callbackBehaviour, callback);
+        Debug.Log($"[UdonMidiPersistence][Request] {{\"reqId\":\"{reqId}\" ,\"id\":\"{dictionaryKey}\", \"dictionaryId\":\"{dictionaryId}\"}}");
     }
 
-    public void Save(GameObject targetGameObject, string name)
+    /// <summary>
+    /// Save a value to the app. Uses the world id dictionary.
+    /// </summary>
+    /// <param name="gameObject">The game object/udon behaviour to save the value from</param>
+    /// <param name="variableName">The field to save</param>
+    public void Save(GameObject targetGameObject, string variableName)
     {
-        Save(targetGameObject, name, WorldIdentifier);
+        Save(WorldIdentifier, $"{targetGameObject.name}:{variableName}", targetGameObject, variableName);
     }
-
-    public void Save(GameObject targetGameObject, string name, string dictionaryId)
+    
+    /// <summary>
+    /// Save a value to the app. Use the Save Method, only if you are not 100% sure how this method works.
+    /// </summary>
+    /// <param name="targetGameObject">The gameobject/udon behaviour that contains the field</param>
+    /// <param name="targetFieldName">The name of the field</param>
+    /// <param name="dictionaryId">The dictionary to save the field to</param>
+    /// <param name="dictionaryKey">The key to save the field to</param>
+    public void Save(string dictionaryId, string dictionaryKey, GameObject targetGameObject, string variableName)
     {
+        if(_blockInput) return;
         if(targetGameObject == null) return;
-        if(string.IsNullOrEmpty(name)) return;
+        if(string.IsNullOrEmpty(variableName)) return;
 
         UdonBehaviour behaviour = targetGameObject.GetComponent<UdonBehaviour>();
 
         string value = "";
-        System.Type varType = GetVariableType(behaviour, name);
+        System.Type varType = GetVariableType(behaviour, variableName);
         if(varType == typeof(string))
-            value = "\"" + behaviour.GetProgramVariable(name) + "\"";
+            value = "\"" + behaviour.GetProgramVariable(variableName) + "\"";
         else if(varType == typeof(int))
-            value = behaviour.GetProgramVariable(name).ToString();
+            value = behaviour.GetProgramVariable(variableName).ToString();
         else if(varType == typeof(float))
-            value = ((float)behaviour.GetProgramVariable(name)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            value = ((float)behaviour.GetProgramVariable(variableName)).ToString(System.Globalization.CultureInfo.InvariantCulture);
         else if(varType == typeof(Vector3))
-            value = $"\"{behaviour.GetProgramVariable(name).ToString()}\"";
+            value = $"\"{behaviour.GetProgramVariable(variableName).ToString()}\"";
         else
         {
             Debug.LogError($"[UdonMidiPersistence][ErrorSave] Unsupported type: {varType}");
             return;
         }
-        Debug.Log($"[UdonMidiPersistence][Save] {{\"id\":\"{targetGameObject.name}:{name}\", \"value\":{value}, \"type\":\"{varType}\", \"dictionaryId\":\"{dictionaryId}\"}}");
+        Debug.Log($"[UdonMidiPersistence][Save] {{\"id\":\"{dictionaryKey}\", \"value\":{value}, \"type\":\"{varType}\", \"dictionaryId\":\"{dictionaryId}\"}}");
     }
 
     public void FinishedInitilization()
@@ -183,8 +241,10 @@ public class UdonMidiPersistence : UdonSharpBehaviour
         return s;
     }
 
+    //int midiCount = 0;
     public override void MidiNoteOn(int channel, int midiNumber, int midiValue)
     {
+        //Debug.Log("Midi : "+   (++midiCount));
         // Debug.Log("Midi recieved: "+ channel + " " + midiNumber + " " + midiValue);
         int bits = (midiNumber << 7) + (midiValue); // 14 bits
         // add last partical bits to front
@@ -220,29 +280,26 @@ public class UdonMidiPersistence : UdonSharpBehaviour
                 // Decode message
                 int idLength = _byteCache[2];
                 int type = _byteCache[3];
-                string id = DecodeString(_byteCache, 4, idLength);
+                string reqId = DecodeString(_byteCache, 4, idLength);
                 int valueOffset = 4 + idLength;
 
                 // Get target
-                string[] parts = id.Split(':');
-                if(parts.Length != 2)
+                if(string.IsNullOrEmpty(reqId))
                 {
                     // invalid value identifier
+                    Debug.LogError("[UdonMidiPersistence][Error] Invalid value identifier");
                     return;
                 }
                 DequeueRequest();
-                while(_requestGameObject != null && (_requestGameObject.name != parts[0] || _requestVariable != parts[1]))
+                while(_requestGameObject != null && reqId != _requestRequestId)
                 {
-                    if(_requestGameObject.name != parts[0])
-                        Debug.LogWarning($"[UdonMidiPersistence] recieved object name {parts[0]} does not match queue head {_requestGameObject.name}. Skipping queue head.");
-                    else if(_requestVariable != parts[1])
-                        Debug.LogWarning($"[UdonMidiPersistence] recieved variable name {parts[1]} does not match queue head {_requestVariable}. Skipping queue head.");
+                    Debug.LogWarning($"[UdonMidiPersistence] request id {reqId} does not match queue head {_requestRequestId}. Skipping queue head.");
                     DequeueRequest();
                 }
                 if(_requestGameObject == null)
                 {
                     // invalid gameobject
-                    Debug.LogError($"[UdonMidiPersistence] Invalid gameobject: {parts[0]}");
+                    Debug.LogError($"[UdonMidiPersistence] Invalid gameobject: {reqId}");
                     return;
                 }
 
@@ -250,7 +307,7 @@ public class UdonMidiPersistence : UdonSharpBehaviour
                 if(behaviour == null)
                 {
                     // invalid behaviour
-                    Debug.LogError($"[UdonMidiPersistence] Invalid behaviour: {parts[0]}");
+                    Debug.LogError($"[UdonMidiPersistence] Invalid behaviour: {reqId}");
                     return;
                 }
 
@@ -281,23 +338,20 @@ public class UdonMidiPersistence : UdonSharpBehaviour
                         dataType = typeof(Vector3);
                     }
 
-                    if(dataType == typeof(string))
-                        Debug.Log($"[UdonMidiPersistence][Recieved] {{\"id\":\"{id}\", \"value\":\"{value}\", \"type\":\"{dataType}\"}}");
-                    else
-                        Debug.Log($"[UdonMidiPersistence][Recieved] {{\"id\":\"{id}\", \"value\":{value}, \"type\":\"{dataType}\"}}");
+                    Debug.Log($"[UdonMidiPersistence][Recieved] {behaviour.name}:{_requestVariable} => {value}");
 
-                    System.Type varType = GetVariableType(behaviour, parts[1]);
+                    System.Type varType = GetVariableType(behaviour, _requestVariable);
                     if(varType != dataType)
                     {
                         // invalid field
-                        Debug.LogError($"[UdonMidiPersistence] Recieved datatype {dataType} does not match field type {varType} for {parts[0]}:{parts[1]}");
+                        Debug.LogError($"[UdonMidiPersistence] Recieved datatype {dataType} does not match field type {varType} for {behaviour.name}:{_requestVariable}");
                         return;
                     }
                     // the variable type will be changed to object cause udon fucking sucks
-                    behaviour.SetProgramVariable(parts[1], value);
+                    behaviour.SetProgramVariable(_requestVariable, value);
                 }else
                 {
-                    Debug.Log($"[UdonMidiPersistence][Recieved] {{\"id\":\"{id}\", \"value\":NOT SAVED}}");
+                    Debug.Log($"[UdonMidiPersistence][Recieved] {behaviour.name}:{_requestVariable}) => [NOT SAVED]");
                 }
 
                 if(_requestCallbackObject != null && _requestCallbackMethod != null)
@@ -306,7 +360,7 @@ public class UdonMidiPersistence : UdonSharpBehaviour
                 }
 
                 // Check if is init
-                if(id == _lastAutoId && !_isInitialized)
+                if(reqId == _lastAutoId && !_isInitialized)
                 {
                     FinishedInitilization();
                 }
@@ -337,6 +391,7 @@ public class UdonMidiPersistence : UdonSharpBehaviour
     {
         if(RequestedGameObjectQueue.Length == 0)
         {
+            _requestRequestId = null;
             _requestGameObject = null;
             _requestVariable = null;
             _requestCallbackObject = null;
@@ -359,11 +414,16 @@ public class UdonMidiPersistence : UdonSharpBehaviour
         temp2 = RequestedVariableQueue;
         RequestedVariableQueue = new string[temp2.Length - 1];
         System.Array.Copy(temp2, 1, RequestedVariableQueue, 0, temp2.Length - 1);
+        _requestRequestId = RequestIdQueue[0];
+        temp2 = RequestIdQueue;
+        RequestIdQueue = new string[temp2.Length - 1];
+        System.Array.Copy(temp2, 1, RequestIdQueue, 0, temp2.Length - 1);
         return true;
     }
 
-    void EnqueueRequest(GameObject go, string variableName, GameObject callbackOb, string callbackMethod)
+    string EnqueueRequest(GameObject go, string variableName, GameObject callbackOb, string callbackMethod)
     {
+        string reqId = _counterPrefix+_counter++;
         GameObject[] temp = RequestedGameObjectQueue;
         RequestedGameObjectQueue = new GameObject[temp.Length + 1];
         System.Array.Copy(temp, RequestedGameObjectQueue, temp.Length);
@@ -380,6 +440,11 @@ public class UdonMidiPersistence : UdonSharpBehaviour
         RequestedVariableQueue = new string[temp2.Length + 1];
         System.Array.Copy(temp2, RequestedVariableQueue, temp2.Length);
         RequestedVariableQueue[temp2.Length] = variableName;
+        temp2 = RequestIdQueue;
+        RequestIdQueue = new string[temp2.Length + 1];
+        System.Array.Copy(temp2, RequestIdQueue, temp2.Length);
+        RequestIdQueue[temp2.Length] = reqId;
+        return reqId;
     }
 
     

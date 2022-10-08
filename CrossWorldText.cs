@@ -25,7 +25,7 @@ public class CrossWorldText : UdonSharpBehaviour
     {
         if(!_wasEdited)
         {
-            Persistence.Request(this.gameObject, nameof(SavedString), nameof(LoadedText), StringSaveID);
+            Persistence.Request("CrossWorldText", StringSaveID, this.gameObject, nameof(SavedString), this.gameObject, nameof(LoadedText));
         }
     }
 
@@ -47,7 +47,7 @@ public class CrossWorldText : UdonSharpBehaviour
             _syncedString = value;
             TextField.text = value;
             SavedString = value;
-            Persistence.Save(this.gameObject, nameof(SavedString), StringSaveID);
+            Persistence.Save("CrossWorldText", StringSaveID, this.gameObject, nameof(SavedString));
         }
     }
 
