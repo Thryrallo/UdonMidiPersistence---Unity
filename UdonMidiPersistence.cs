@@ -8,12 +8,8 @@ public class UdonMidiPersistence : UdonSharpBehaviour
 {
     public string WorldIdentifier;
     [Header("Auto Persistence Fields on Join/Leave")]
-    public UdonBehaviour[] BehavioursStrings;
-    public string [] FieldsStrings;
-    public UdonBehaviour[] BehavioursInts;
-    public string [] FieldsInts;
-    public UdonBehaviour[] BehavioursFloats;
-    public string [] FieldsFloats;
+    public UdonBehaviour[] AutoSaveBehaviours;
+    public string [] AutoSaveFieldNames;
 
     [Header("Hooks after OnJoin Loading")]
     public UdonBehaviour[] AfterLoadHooksBehaviours;
@@ -22,6 +18,12 @@ public class UdonMidiPersistence : UdonSharpBehaviour
     [Header("Hooks before OnLeave Saving")]
     public UdonBehaviour[] BeforeSaveHooksBehaviours;
     public string[] BeforeSaveHooksMethods;
+
+    [Header("Objects to enable if Midi Persistence available")]
+    [Header("Following are updated once first load is done")]
+    public GameObject[] EnableIfMidiPersistenceAvailable;
+    [Header("Objects to enable if Midi Persistence not available")]
+    public GameObject[] EnableIfMidiPersistenceNotAvailable;
 
     // Incoming data format:
     // Each message has 14 bits
@@ -52,6 +54,7 @@ public class UdonMidiPersistence : UdonSharpBehaviour
     const int DATA_TYPE_FLOAT = 2;
     const int DATA_TYPE_STRING = 3;
     const int DATA_TYPE_VECTOR3 = 4;
+    const int DATA_TYPE_FLOAT_ARRAY = 5;
 
     byte[] _currentValueBytes = new byte[4];
 
@@ -70,6 +73,8 @@ public class UdonMidiPersistence : UdonSharpBehaviour
     bool _isInitialized;
     string _lastAutoId;
     bool _blockInput;
+    bool _isMidiPersistenceAvailable;
+    bool _isFirstMessagee;
 
     string _counterPrefix;
     int _counter;
@@ -93,20 +98,22 @@ public class UdonMidiPersistence : UdonSharpBehaviour
             return;
         }
         Debug.Log("[UdonMidiPersistence][Start]");
-        for(int i = 0; i < BehavioursStrings.Length; i++)
+        for(int i = 0; i < AutoSaveBehaviours.Length; i++)
         {
-            Request(BehavioursStrings[i].gameObject, FieldsStrings[i], null);
-        }
-        for(int i = 0; i < BehavioursInts.Length; i++)
-        {
-            Request(BehavioursInts[i].gameObject, FieldsInts[i], null);
-        }
-        for(int i = 0; i < BehavioursFloats.Length; i++)
-        {
-            Request(BehavioursFloats[i].gameObject, FieldsFloats[i], null);
+            Request(AutoSaveBehaviours[i].gameObject, AutoSaveFieldNames[i], null);
         }
         if(_counter == 0) _isInitialized = true;
         else _lastAutoId = _counterPrefix+_counter;
+
+        // Will be updasted once first message is received
+        foreach(GameObject obj in EnableIfMidiPersistenceNotAvailable)
+        {
+            obj.SetActive(true);
+        }
+        foreach(GameObject obj in EnableIfMidiPersistenceAvailable)
+        {
+            obj.SetActive(false);
+        }
     }
 
     public override void OnPlayerLeft(VRCPlayerApi player)
@@ -117,12 +124,8 @@ public class UdonMidiPersistence : UdonSharpBehaviour
             for(int i=0;i<BeforeSaveHooksBehaviours.Length;i++)
                 BeforeSaveHooksBehaviours[i].SendCustomEvent(BeforeSaveHooksMethods[i]);
 
-            for(int i = 0; i < BehavioursStrings.Length; i++)
-                Save(BehavioursStrings[i].gameObject, FieldsStrings[i]);
-            for(int i = 0; i < BehavioursInts.Length; i++)
-                Save(BehavioursInts[i].gameObject, FieldsInts[i]);
-            for(int i = 0; i < BehavioursFloats.Length; i++)
-                Save(BehavioursFloats[i].gameObject, FieldsFloats[i]);
+            for(int i = 0; i < AutoSaveBehaviours.Length; i++)
+                Save(AutoSaveBehaviours[i].gameObject, AutoSaveFieldNames[i]);
         }
     }
 
@@ -175,7 +178,7 @@ public class UdonMidiPersistence : UdonSharpBehaviour
     /// <param name="variableName">The field to save</param>
     public void Save(GameObject targetGameObject, string variableName)
     {
-        Save(WorldIdentifier, $"{targetGameObject.name}:{variableName}", targetGameObject, variableName);
+        Save(WorldIdentifier, $"{targetGameObject.name}:{variableName}", targetGameObject, variableName, null);
     }
     
     /// <summary>
@@ -185,30 +188,59 @@ public class UdonMidiPersistence : UdonSharpBehaviour
     /// <param name="targetFieldName">The name of the field</param>
     /// <param name="dictionaryId">The dictionary to save the field to</param>
     /// <param name="dictionaryKey">The key to save the field to</param>
-    public void Save(string dictionaryId, string dictionaryKey, GameObject targetGameObject, string variableName)
+    public void Save(string dictionaryId, string dictionaryKey, GameObject targetGameObject, string variableName, System.Type variableType)
     {
+        // GetProgramVariableType returns null as soon as the varialbe is set anywhere by udon
+        // This is why the type should be passed in if doing custom logic where the first action is not a request or load that can cache the type
         if(_blockInput) return;
         if(targetGameObject == null) return;
         if(string.IsNullOrEmpty(variableName)) return;
 
         UdonBehaviour behaviour = targetGameObject.GetComponent<UdonBehaviour>();
+        
+        variableType = GetVariableType(behaviour, variableName, variableType);
 
         string value = "";
-        System.Type varType = GetVariableType(behaviour, variableName);
-        if(varType == typeof(string))
-            value = "\"" + behaviour.GetProgramVariable(variableName) + "\"";
-        else if(varType == typeof(int))
-            value = behaviour.GetProgramVariable(variableName).ToString();
-        else if(varType == typeof(float))
-            value = ((float)behaviour.GetProgramVariable(variableName)).ToString(System.Globalization.CultureInfo.InvariantCulture);
-        else if(varType == typeof(Vector3))
-            value = $"\"{behaviour.GetProgramVariable(variableName).ToString()}\"";
+        object variableValue = behaviour.GetProgramVariable(variableName);
+        float[] floatArray = null; // needs special variable because udon will throw a fit else
+
+        // Lots of special math types are converted to float arrays to cut down on logic
+        if(variableType == typeof(float[]))
+        {
+            floatArray = (float[])variableValue;
+        }
+        if(variableType == typeof(Color))
+        {
+            Color c = (Color)variableValue;
+            floatArray = new float[] { c.r, c.g, c.b, c.a };
+            variableType = typeof(float[]);
+        }
+
+        if(variableType == typeof(string))
+            value = "\"" + variableValue + "\"";
+        else if(variableType == typeof(int))
+            value = variableValue.ToString();
+        else if(variableType == typeof(float))
+            value = ((float)variableValue).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        else if(variableType == typeof(Vector3))
+            value = $"\"{variableValue.ToString()}\"";
+        else if(variableType == typeof(float[]))
+        {
+            value = "[";
+            for(int i = 0; i < floatArray.Length; i++)
+            {
+                value += floatArray[i].ToString(System.Globalization.CultureInfo.InvariantCulture);
+                if(i < floatArray.Length - 1)
+                    value += ",";
+            }
+            value += "]";
+        } 
         else
         {
-            Debug.LogError($"[UdonMidiPersistence][ErrorSave] Unsupported type: {varType}");
+            Debug.LogError($"[UdonMidiPersistence][ErrorSave] Unsupported type: {variableType}");
             return;
         }
-        Debug.Log($"[UdonMidiPersistence][Save] {{\"id\":\"{dictionaryKey}\", \"value\":{value}, \"type\":\"{varType}\", \"dictionaryId\":\"{dictionaryId}\"}}");
+        Debug.Log($"[UdonMidiPersistence][Save] {{\"id\":\"{dictionaryKey}\", \"value\":{value}, \"type\":\"{variableType}\", \"dictionaryId\":\"{dictionaryId}\"}}");
     }
 
     public void FinishedInitilization()
@@ -313,6 +345,7 @@ public class UdonMidiPersistence : UdonSharpBehaviour
 
                 if(type != DATA_TYPE_NONE) // is NONE if data is not saved 
                 {
+                    System.Type varType = GetVariableType(behaviour, _requestVariable, null);
                     // Decode value
                     object value = null;
                     System.Type dataType = null;
@@ -336,11 +369,23 @@ public class UdonMidiPersistence : UdonSharpBehaviour
                         float z = BitConverter.ToSingle(new byte[]{_byteCache[valueOffset+11], _byteCache[valueOffset+10], _byteCache[valueOffset+9], _byteCache[valueOffset+8]});
                         value = new Vector3(x, y, z);
                         dataType = typeof(Vector3);
+                    }else if(type == DATA_TYPE_FLOAT_ARRAY)
+                    {
+                        int arrayLength = _byteCache[valueOffset+0] * 256 + _byteCache[valueOffset+1];
+                        float[] array = new float[arrayLength];
+                        for(int i = 0; i < arrayLength; i++)
+                        {
+                            array[i] = BitConverter.ToSingle(new byte[]{_byteCache[valueOffset+5+i*4], _byteCache[valueOffset+4+i*4], _byteCache[valueOffset+3+i*4], _byteCache[valueOffset+2+i*4]});
+                        }
+                        if(varType == typeof(Color))
+                        {
+                            value = new Color(array[0], array[1], array[2], array[3]);
+                            dataType = typeof(Color);
+                        }
                     }
 
                     Debug.Log($"[UdonMidiPersistence][Recieved] {behaviour.name}:{_requestVariable} => {value}");
-
-                    System.Type varType = GetVariableType(behaviour, _requestVariable);
+                    
                     if(varType != dataType)
                     {
                         // invalid field
@@ -364,26 +409,46 @@ public class UdonMidiPersistence : UdonSharpBehaviour
                 {
                     FinishedInitilization();
                 }
+
+                if(_isFirstMessagee)
+                {
+                    _isMidiPersistenceAvailable = true;
+                    _isFirstMessagee = false;
+                    foreach(GameObject obj in EnableIfMidiPersistenceAvailable)
+                    {
+                        obj.SetActive(true);
+                    }
+                    foreach(GameObject obj in EnableIfMidiPersistenceNotAvailable)
+                    {
+                        obj.SetActive(false);
+                    }
+                }
             }
         }
     }
 
     // Need to cache the variable types, because after first setting they will return 'object'
     object[][] _variableTypeDictionary = new object[0][];
-    System.Type GetVariableType(UdonBehaviour behaviour, string variableName)
+    System.Type GetVariableType(UdonBehaviour behaviour, string variableName, System.Type set)
     {
         string index = behaviour.gameObject.name + ":" + variableName;
         foreach(object[] entry in _variableTypeDictionary)
         {
             if(entry[0].Equals(index))
+            {
+                if(set != null)
+                {
+                    entry[1] = set;
+                }
                 return (System.Type)entry[1];
+            }
         }
-        System.Type type = behaviour.GetProgramVariableType(variableName);
+        if(set == null) set = behaviour.GetProgramVariableType(variableName);
         object[][] temp = _variableTypeDictionary;
         _variableTypeDictionary = new object[temp.Length + 1][];
         System.Array.Copy(temp, _variableTypeDictionary, temp.Length);
-        _variableTypeDictionary[temp.Length] = new object[]{index, type};
-        return type;
+        _variableTypeDictionary[temp.Length] = new object[]{index, set};
+        return set;
     }
 
 

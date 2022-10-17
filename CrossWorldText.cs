@@ -47,7 +47,7 @@ public class CrossWorldText : UdonSharpBehaviour
             _syncedString = value;
             TextField.text = value;
             SavedString = value;
-            Persistence.Save("CrossWorldText", StringSaveID, this.gameObject, nameof(SavedString));
+            Persistence.Save("CrossWorldText", StringSaveID, this.gameObject, nameof(SavedString), typeof(string));
         }
     }
 
